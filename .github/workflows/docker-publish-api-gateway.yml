@@ -30,8 +30,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           # IMPORTANT: Set context to the api-gateway directory
-          context: ./api-gateway # Adjust path if needed
-          file: ./api-gateway/Dockerfile # Path to Dockerfile relative to repo root
+          context: . # Adjust path if needed
+          file: ./Dockerfile # Path to Dockerfile relative to repo root
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/api-gateway:latest
