@@ -34,7 +34,6 @@ jobs:
           file: ./api-gateway/Dockerfile # Path to Dockerfile relative to repo root
           push: true
           tags: |
-            # Use a distinct image name
             ${{ secrets.DOCKERHUB_USERNAME }}/api-gateway:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/api-gateway:${{ github.sha }}
           cache-from: type=gha
