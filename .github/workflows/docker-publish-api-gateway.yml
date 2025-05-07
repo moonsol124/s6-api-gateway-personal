@@ -4,9 +4,6 @@ name: Build and Push Docker Image (API Gateway)
 on:
   push:
     branches: [ main ]
-    paths: # Optional: Trigger only if gateway files change
-      - 'api-gateway/**' # Adjust path if needed
-      - '.github/workflows/docker-publish-api-gateway.yml'
   workflow_dispatch:
 
 jobs:
