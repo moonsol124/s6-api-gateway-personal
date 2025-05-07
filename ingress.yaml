@@ -1,0 +1,67 @@
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app-ingress
+  namespace: app-services
+  annotations:
+    # This rewrite target is for paths with capture groups like (.*)
+    # Ensure your backend services expect paths like / (for /api/foo) or /foo
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx # Ensure this matches your Ingress controller class
+  rules:
+  # --- Rule 1 (Default rule for all hosts if no host is specified) ---
+  - http: # 'http' is a direct child of the rule item '-' when 'host' is omitted
+      paths: # 'paths' is a child of 'http'
+      # --- Path for Frontend ---
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-svc
+            port:
+              number: 80
+
+      # --- Paths for API Gateway ---
+      - path: /api(/|$)(.*) # Matches /api, /api/, /api/anything
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway-svc
+            port:
+              number: 80
+
+      - path: /auth/callback
+        pathType: Exact
+        backend:
+          service:
+            name: api-gateway-svc # Callback is handled by the gateway
+            port:
+              number: 80
+
+      # --- Paths for OAuth Server (browser needs to reach these) ---
+      - path: /authorize
+        pathType: Exact
+        backend:
+          service:
+            name: oauth-server-svc
+            port:
+              number: 80
+
+      - path: /login # For the login form submission
+        pathType: Exact
+        backend:
+          service:
+            name: oauth-server-svc
+            port:
+              number: 80
+
+      - path: /consent # For the consent form submission
+        pathType: Exact
+        backend:
+          service:
+            name: oauth-server-svc
+            port:
+              number: 80
+  # --- End of Rule 1 ---

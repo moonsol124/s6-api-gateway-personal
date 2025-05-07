@@ -1,24 +1,27 @@
 // gateway.js
-require('dotenv').config();
+require('dotenv').config(); // For local development
 const express = require('express');
 const cors = require('cors');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const session = require('express-session');
 const axios = require('axios');
-// const cookieParser = require('cookie-parser'); // Usually not needed directly if using express-session correctly
 
 const app = express();
-const gatewayPort = process.env.GATEWAY_PORT || 3002;
+const gatewayPort = process.env.PORT || 3002; // Standardize to PORT like other services
+
+// --- Determine if running in a production-like environment (for cookie settings) ---
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // --- Configuration Validation ---
 const requiredEnvVars = [
     'PROPERTIES_SERVICE_URL',
+    'USER_SERVICE_URL', // Added User Service URL here for validation
     'OAUTH_SERVER_URL',
     'OAUTH_CLIENT_ID',
     'OAUTH_CLIENT_SECRET',
-    'GATEWAY_CALLBACK_URI',
+    'GATEWAY_PUBLIC_CALLBACK_URI', // Renamed for clarity: this is the public URI
     'SESSION_SECRET',
-    'FRONTEND_URL' // Good practice to ensure it's set for redirects
+    'FRONTEND_URL'
 ];
 
 for (const varName of requiredEnvVars) {
@@ -31,135 +34,64 @@ for (const varName of requiredEnvVars) {
 // --- Service URLs ---
 const propertiesServiceUrl = process.env.PROPERTIES_SERVICE_URL;
 const oauthServerUrl = process.env.OAUTH_SERVER_URL;
-const userServiceUrl = process.env.USER_SERVICE_URL; // Add User Service URL
+const userServiceUrl = process.env.USER_SERVICE_URL;
 
 // --- Middleware ---
 
-// CORS Configuration: Allow credentials (cookies) from your frontend origin
+// CORS Configuration
 app.use(cors({
-    origin: process.env.FRONTEND_URL, // Allow requests only from your frontend
-    credentials: true // Important for cookies/sessions
+    origin: process.env.FRONTEND_URL,
+    credentials: true
 }));
 
-app.use(express.json());
-// app.use(cookieParser()); // Usually not needed if session middleware is configured correctly
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Standard body parsers
+app.use(express.json({ limit: '10mb' })); // For JSON payloads
+app.use(express.urlencoded({ extended: true, limit: '10mb' })); // For URL-encoded payloads
 
-// Session Configuration: Stores session data server-side, sends session ID cookie to browser
+// Session Configuration
 app.use(session({
     secret: process.env.SESSION_SECRET,
-    resave: false, // Don't save session if unmodified
-    saveUninitialized: false, // Don't create session until something stored
+    resave: false,
+    saveUninitialized: false,
     cookie: {
-        secure: process.env.NODE_ENV === 'production', // Use secure cookies in production (HTTPS)
-        httpOnly: true, // Prevent client-side JS access to the cookie
-        maxAge: 24 * 60 * 60 * 1000, // Example: 24 hours
-        sameSite: 'lax' // Recommended for CSRF protection
+        secure: IS_PRODUCTION, // true if https, false if http
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours
+        sameSite: IS_PRODUCTION ? 'None' : 'Lax' // 'None' for cross-site (requires Secure=true), 'Lax' for same-site or dev
     }
 }));
+console.log(`Session cookie configured with: secure=${IS_PRODUCTION}, sameSite=${IS_PRODUCTION ? 'None' : 'Lax'}`);
+
 
 // --- Authentication Middleware for Protected Routes ---
 const requireAuth = (req, res, next) => {
-    // Log the actual incoming request URL
     console.log(`[Auth Middleware] Checking auth for request: ${req.method} ${req.originalUrl}`);
-
+    // Check for session, access token, and if the token is expired
     if (req.session && req.session.accessToken && Date.now() < req.session.tokenExpiresAt) {
-        // User is authenticated and token is not expired
-        req.headers['Authorization'] = `Bearer ${req.session.accessToken}`;
-        // Log which request is getting the token attached
+        req.headers['authorization'] = `Bearer ${req.session.accessToken}`; // Note: http-proxy-middleware uses 'authorization' not 'Authorization' by default for outgoing
         console.log(`[Auth Middleware] Valid session. Attaching Bearer token for: ${req.method} ${req.originalUrl}`);
         next();
     } else {
-        // Log details if authentication fails
         const reason = !(req.session && req.session.accessToken) ? "No session/token" : "Token expired";
         console.log(`[Auth Middleware] No valid session/token for ${req.method} ${req.originalUrl}. Reason: ${reason}. Denying access.`);
         res.status(401).json({ error: 'Unauthorized', message: 'Authentication required.' });
     }
 };
 
-console.log(`>>> Configuring proxy for /api/users. Target URL: [${userServiceUrl}]`); // ADD THIS LINE
- 
-// *** ADD USER PROXY ROUTE ***
-app.use('/api/users', requireAuth, createProxyMiddleware({
-    target: userServiceUrl,
-    changeOrigin: true,
-    pathRewrite: (path, req) => {
-        const newPath = path.replace('/api/users', '/profiles');
-        console.log(`[Gateway Path Rewrite] Original: ${path}, Rewritten: ${newPath}`); // Add logging
-        return newPath;
-    },
-    onProxyReq: (proxyReq, req, res) => {
-        // Auth header is added by requireAuth
-        console.log(`[Gateway->Users] Proxying request to ${userServiceUrl}${proxyReq.path}`);
-        console.log(`[Gateway->Users] Authorization Header Sent: ${proxyReq.getHeader('Authorization') ? 'Yes' : 'No'}`);
-    },
-    onError: (err, req, res) => {
-       console.error('Users Proxy Error:', err);
-       if (!res.headersSent) {
-           res.status(503).json({ error: 'User service unavailable', details: err.message });
-       }
-    }
-}));
-
-
-// Use the new path prefix '/api/property-service'
-const bodyParser = require('body-parser');
-// Add this before your proxy middleware
-app.use((req, res, next) => {
-    if (req.url.startsWith('/api/property-service')) {
-      console.log(`[Debug] ${req.method} request to ${req.url}`);
-      console.log(`[Debug] Headers: ${JSON.stringify(req.headers)}`);
-      if (req.body) console.log(`[Debug] Body: ${JSON.stringify(req.body)}`);
-    }
-    next();
-  });
-
-  // Parse JSON only for non-proxy routes
-app.use((req, res, next) => {
-  if (!req.url.startsWith('/api/property-service')) {
-    express.json()(req, res, next);
-  } else {
-    next();
-  }
-});
-
-// For the proxy route, use raw body parsing
-// Then set up the proxy with proper body handling
-app.use('/api/property-service', requireAuth, createProxyMiddleware({
-    target: propertiesServiceUrl,
-    changeOrigin: true,
-    pathRewrite: {
-      '^/api/property-service': '/properties',
-    },
-    // IMPORTANT: Don't manipulate the onProxyReq for now
-    // The default behavior should work for JSON bodies
-    onProxyReq: function(proxyReq, req, res) {
-      // Only log, don't modify the request
-      console.log(`[Gateway->Property Service] Proxying ${req.method} request to ${propertiesServiceUrl}${proxyReq.path}`);
-      console.log(`[Gateway->Property Service] Authorization Header Sent: ${proxyReq.getHeader('Authorization') ? 'Yes' : 'No'}`);
-    },
-    onError: (err, req, res) => {
-      console.error('Property Service Proxy Error:', err);
-      if (!res.headersSent) {
-        res.status(503).json({ error: 'Property service unavailable', details: err.message });
-      }
-    }
-  }));
 // --- Basic Route for Testing Gateway ---
 app.get('/', (req, res) => {
-    res.send('API Gateway is running');
+    res.send(`API Gateway is running. IS_PRODUCTION: ${IS_PRODUCTION}`);
 });
 
 // --- Authentication Routes ---
 
-// 1. Callback URL: Handles the redirect from the OAuth server after user grants consent
+// 1. Callback URL: Handles the redirect from the OAuth server
 app.get('/auth/callback', async (req, res) => {
     const { code, error, error_description } = req.query;
-    console.log('[Gateway /auth/callback] Received callback. Query:', req.query); // Log incoming query
+    console.log('[Gateway /auth/callback] Received callback. Query:', req.query);
 
     if (error) {
         console.error('[Gateway /auth/callback] OAuth Error received directly:', { error, error_description });
-        // Redirect to frontend with error information
         return res.redirect(`${process.env.FRONTEND_URL}/login?error=${encodeURIComponent(error)}&error_description=${encodeURIComponent(error_description || 'Unknown error')}`);
     }
 
@@ -170,29 +102,23 @@ app.get('/auth/callback', async (req, res) => {
 
     console.log('[Gateway /auth/callback] Extracted code:', code);
 
-    // Prepare payload for token request
     const tokenPayload = new URLSearchParams({
         grant_type: 'authorization_code',
-        code: code,
-        redirect_uri: process.env.GATEWAY_CALLBACK_URI, // Must match exactly what was used in /authorize and registered
+        code: code.toString(), // Ensure code is a string
+        redirect_uri: process.env.GATEWAY_PUBLIC_CALLBACK_URI, // CRITICAL: Use the public callback URI
         client_id: process.env.OAUTH_CLIENT_ID,
         client_secret: process.env.OAUTH_CLIENT_SECRET
     });
 
     console.log('[Gateway /auth/callback] Sending request to /token endpoint...');
     console.log('[Gateway /auth/callback]   -> URL:', `${oauthServerUrl}/token`);
-    console.log('[Gateway /auth/callback]   -> Method: POST');
     console.log('[Gateway /auth/callback]   -> Payload (URL Encoded):', tokenPayload.toString());
-    console.log('[Gateway /auth/callback]   -> Headers: Content-Type: application/x-www-form-urlencoded');
 
     try {
-        // 2. Exchange authorization code for access token
-        const tokenResponse = await axios.post(`${oauthServerUrl}/token`, tokenPayload, {
+        const tokenResponse = await axios.post(`${oauthServerUrl}/token`, tokenPayload.toString(), { // Send as string
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            // Optional: Add timeout
-            // timeout: 10000 // 10 seconds
+            }
         });
 
         console.log('[Gateway /auth/callback] Token response received successfully.');
@@ -202,114 +128,160 @@ app.get('/auth/callback', async (req, res) => {
         const { access_token, refresh_token, expires_in } = tokenResponse.data;
 
         if (!access_token) {
-            // Should ideally not happen if status is 200, but check defensively
-            console.error('[Gateway /auth/callback] Token Exchange Error: No access token found in response data.');
-             return res.redirect(`${process.env.FRONTEND_URL}/login?error=token_exchange_failed&error_description=No access token received`);
+            console.error('[Gateway /auth/callback] Token Exchange Error: No access token found.');
+            return res.redirect(`${process.env.FRONTEND_URL}/login?error=token_exchange_failed&error_description=No access token received`);
         }
 
-        // 3. Store token details in the session
         req.session.accessToken = access_token;
-        req.session.refreshToken = refresh_token;
-        req.session.tokenExpiresAt = Date.now() + (expires_in * 1000);
+        req.session.refreshToken = refresh_token; // Store refresh token if you plan to use it
+        req.session.tokenExpiresAt = Date.now() + ((expires_in || 3600) * 1000); // Use expires_in, default to 1hr
 
-        console.log('[Gateway /auth/callback] Session established successfully.');
-        // console.log('[Gateway /auth/callback] Session ID:', req.session.id); // Optional: Log session ID
-
-        // 4. Redirect user back to the frontend dashboard
-        // Consider where the user intended to go, if stored in session before /authorize redirect
-        const redirectTarget = process.env.FRONTEND_URL + '/'; // Default to root/dashboard
+        console.log('[Gateway /auth/callback] Session established successfully. Session ID:', req.session.id);
+        
+        const redirectTarget = req.session.originalUrl || process.env.FRONTEND_URL + '/'; // Redirect to original URL or default
+        delete req.session.originalUrl; // Clean up
         console.log(`[Gateway /auth/callback] Redirecting user to: ${redirectTarget}`);
         res.redirect(redirectTarget);
 
     } catch (err) {
-        // Log detailed error information from the token exchange attempt
         console.error('!!! [Gateway /auth/callback] Error during OAuth token exchange:');
         let errorMsg = 'token_exchange_error';
         let errorDesc = 'Failed to exchange authorization code for token.';
 
-         if (err.response) {
-            // Error response received from the OAuth server (/token endpoint)
+        if (err.response) {
             console.error('[Gateway /auth/callback]   -> OAuth Server Error Status:', err.response.status);
             console.error('[Gateway /auth/callback]   -> OAuth Server Error Data:', err.response.data);
-            // Use specific error from OAuth server if available
             errorMsg = err.response.data.error || errorMsg;
             errorDesc = err.response.data.error_description || errorDesc;
-         } else if (err.request) {
-             // The request was made but no response was received
-             console.error('[Gateway /auth/callback]   -> No response received from OAuth server:', err.request);
-             errorDesc = 'No response received from authentication server.';
-         } else {
-             // Something happened in setting up the request that triggered an Error
-             console.error('[Gateway /auth/callback]   -> Error setting up token request:', err.message);
-             errorDesc = 'Error occurred while preparing authentication request.';
-         }
-         // Log the error object itself for more details if needed
-         // console.error(err);
-
-        // Redirect to frontend with specific error info
+        } else if (err.request) {
+            console.error('[Gateway /auth/callback]   -> No response received from OAuth server (Network Error or Timeout)');
+            errorDesc = 'No response received from authentication server.';
+        } else {
+            console.error('[Gateway /auth/callback]   -> Error setting up token request:', err.message);
+            errorDesc = 'Error occurred while preparing authentication request.';
+        }
         res.redirect(`${process.env.FRONTEND_URL}/login?error=${encodeURIComponent(errorMsg)}&error_description=${encodeURIComponent(errorDesc)}`);
     }
 });
 
-// 5. Check Authentication Status Endpoint
+// 2. Start OAuth Flow (Optional: if gateway initiates it)
+app.get('/auth/login', (req, res) => {
+    // Store the original URL the user was trying to access, if any
+    if (req.query.redirect) {
+        req.session.originalUrl = req.query.redirect;
+    }
+
+    const authorizationUrl = new URL(`${oauthServerUrl}/authorize`);
+    authorizationUrl.searchParams.append('response_type', 'code');
+    authorizationUrl.searchParams.append('client_id', process.env.OAUTH_CLIENT_ID);
+    authorizationUrl.searchParams.append('redirect_uri', process.env.GATEWAY_PUBLIC_CALLBACK_URI);
+    // authorizationUrl.searchParams.append('scope', 'openid profile email'); // Add scopes as needed
+    // authorizationUrl.searchParams.append('state', 'some_random_state_string'); // Recommended for CSRF protection
+
+    console.log(`[Gateway /auth/login] Redirecting user to OAuth server: ${authorizationUrl.toString()}`);
+    res.redirect(authorizationUrl.toString());
+});
+
+
+// 3. Check Authentication Status Endpoint
 app.get('/auth/status', (req, res) => {
+    console.log('[Gateway /auth/status] Checking auth status. Session ID:', req.sessionID);
+    console.log('[Gateway /auth/status] Session Access Token:', req.session.accessToken ? 'Exists' : 'Missing');
+    console.log('[Gateway /auth/status] Session Expires At:', req.session.tokenExpiresAt ? new Date(req.session.tokenExpiresAt) : 'N/A');
+
     if (req.session && req.session.accessToken && Date.now() < req.session.tokenExpiresAt) {
-        // Optionally, you could add logic here to fetch basic user info if needed
         res.json({ authenticated: true /*, user: { id: req.session.userId } */ });
     } else {
-        // If token is expired or missing, consider it not authenticated
-        // Potential future enhancement: Use refresh token here if available and token is expired
         res.json({ authenticated: false });
     }
 });
 
-// 6. Logout Endpoint
+// 4. Logout Endpoint
 app.get('/auth/logout', (req, res) => {
+    const sessionId = req.sessionID;
     req.session.destroy((err) => {
         if (err) {
-            console.error('Error destroying session:', err);
-             return res.status(500).json({ error: 'Could not log out' });
+            console.error(`[Gateway /auth/logout] Error destroying session ${sessionId}:`, err);
+            return res.status(500).json({ error: 'Could not log out' });
         }
-        // Optional: Clear the session cookie explicitly
-        res.clearCookie('connect.sid'); // Default session cookie name used by express-session
-        console.log('User logged out, session destroyed.');
-        // Send a success response or redirect to the frontend's logged-out page
-        // res.status(200).json({ message: 'Logged out successfully' });
+        res.clearCookie('connect.sid', { path: '/' }); // Ensure path matches how it was set
+        console.log(`[Gateway /auth/logout] User logged out, session ${sessionId} destroyed.`);
         res.redirect(`${process.env.FRONTEND_URL}/login?logout=success`);
+        // TODO: Optionally, redirect to OAuth server's logout endpoint if it supports RP-initiated logout
+        // This would log the user out of the OAuth server itself, not just your app's session.
+        // const oauthLogoutUrl = `${oauthServerUrl}/logout?post_logout_redirect_uri=${process.env.FRONTEND_URL}&client_id=${process.env.OAUTH_CLIENT_ID}`;
+        // res.redirect(oauthLogoutUrl);
     });
-    // Optional: Implement OAuth server token revocation if the server supports it
 });
-
 
 
 // --- Proxy Routes ---
+console.log(`Configuring proxy for /api/users. Target: [${userServiceUrl}]`);
+app.use('/api/users', requireAuth, createProxyMiddleware({
+    target: userServiceUrl,
+    changeOrigin: true,
+    pathRewrite: (path, req) => {
+        const newPath = path.replace('/api/users', '/profiles'); // Assuming /profiles is the target on user-service
+        console.log(`[Gateway Path Rewrite /api/users] Original: ${path}, Rewritten: ${newPath}`);
+        return newPath;
+    },
+    onProxyReq: (proxyReq, req, res) => {
+        console.log(`[Gateway->Users] Proxying request to ${userServiceUrl}${proxyReq.path} with auth header: ${proxyReq.getHeader('authorization') ? 'Yes' : 'No'}`);
+    },
+    onError: (err, req, res) => {
+       console.error('[Gateway->Users] Proxy Error:', err.message);
+       if (!res.headersSent) {
+           res.status(503).json({ error: 'User service unavailable' });
+       }
+    }
+}));
+
+console.log(`Configuring proxy for /api/property-service. Target: [${propertiesServiceUrl}]`);
+app.use('/api/property-service', requireAuth, createProxyMiddleware({
+    target: propertiesServiceUrl,
+    changeOrigin: true,
+    pathRewrite: {
+      '^/api/property-service': '/properties', // Assuming /properties is the target on properties-service
+    },
+    onProxyReq: (proxyReq, req, res) => {
+      console.log(`[Gateway->Property Service] Proxying ${req.method} request to ${propertiesServiceUrl}${proxyReq.path} with auth header: ${proxyReq.getHeader('authorization') ? 'Yes' : 'No'}`);
+    },
+    onError: (err, req, res) => {
+      console.error('[Gateway->Property Service] Proxy Error:', err.message);
+      if (!res.headersSent) {
+        res.status(503).json({ error: 'Property service unavailable' });
+      }
+    }
+}));
 
 
-// --- Add proxies for other *protected* services similarly ---
-/*
-const anotherServiceUrl = process.env.ANOTHER_SERVICE_URL;
-if (anotherServiceUrl) {
-    app.use('/api/another-service', requireAuth, createProxyMiddleware({ // Add requireAuth
-        target: anotherServiceUrl,
-        changeOrigin: true,
-        pathRewrite: {
-            '^/api/another-service': '/internal-path',
-        },
-        // ... other options
-    }));
-}
-*/
-
-// --- 404 Handler for unmatched routes on the gateway ---
+// --- 404 Handler for unmatched API gateway routes ---
 app.use((req, res) => {
-    res.status(404).json({ error: 'Not Found on Gateway' });
+    console.log(`[Gateway 404] Route not found: ${req.method} ${req.originalUrl}`);
+    res.status(404).json({ error: 'Not Found on API Gateway' });
 });
+
+// --- Global Error Handler (Optional but good practice) ---
+app.use((err, req, res, next) => {
+    console.error("!!! [Gateway Global Error Handler] An unexpected error occurred:", err);
+    if (!res.headersSent) {
+        res.status(500).json({ error: "Internal Server Error", message: "An unexpected error occurred on the gateway." });
+    }
+});
+
 
 // --- Start the Gateway Server ---
 app.listen(gatewayPort, () => {
-    console.log(`API Gateway listening at http://localhost:${gatewayPort}`);
-    console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);
-    console.log(`OAuth Server URL configured as: ${process.env.OAUTH_SERVER_URL}`);
-    console.log(`OAuth Callback URI configured as: ${process.env.GATEWAY_CALLBACK_URI}`);
-    console.log(`Proxying /api/properties -> ${propertiesServiceUrl}/properties (Authentication Required)`);
+    console.log("-------------------------------------------------------");
+    console.log(`API Gateway listening at http://localhost:${gatewayPort} (inside container)`);
+    console.log(`NODE_ENV: ${process.env.NODE_ENV || 'development (default)'}`);
+    console.log(`IS_PRODUCTION: ${IS_PRODUCTION}`);
+    console.log(`Frontend URL (for redirects): ${process.env.FRONTEND_URL}`);
+    console.log(`OAuth Server URL (for backend calls): ${oauthServerUrl}`);
+    console.log(`OAuth Client ID: ${process.env.OAUTH_CLIENT_ID ? 'Loaded' : 'MISSING!'}`);
+    console.log(`Gateway Public Callback URI (for /token): ${process.env.GATEWAY_PUBLIC_CALLBACK_URI}`);
+    console.log("--- Proxied Service URLs ---");
+    console.log(`  User Service: ${userServiceUrl}`);
+    console.log(`  Properties Service: ${propertiesServiceUrl}`);
+    console.log("-------------------------------------------------------");
 });
