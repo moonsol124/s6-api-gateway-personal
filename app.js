@@ -123,7 +123,7 @@ console.log(`>>> Configuring proxy for /api/users. Target URL: [${userServiceUrl
 
 // *** ADD USER PROXY ROUTE ***
 // Add requireAuth middleware before createProxyMiddleware
-app.use('/api/users', requireAuth, createProxyMiddleware({
+app.use('/api/users', createProxyMiddleware({
     target: userServiceUrl,
     changeOrigin: true,
     pathRewrite: {
@@ -163,7 +163,7 @@ app.use('/api/users', requireAuth, createProxyMiddleware({
 // Let's keep it simple and rely on default proxy behavior for now.
 
 
-app.use('/api/property-service', requireAuth, createProxyMiddleware({ // Add requireAuth
+app.use('/api/property-service', createProxyMiddleware({ // Add requireAuth
     target: propertiesServiceUrl,
     changeOrigin: true,
     pathRewrite: {
@@ -258,7 +258,7 @@ app.get('/auth/callback', async (req, res) => {
             const errorRedirectUrl = `${process.env.FRONTEND_URL}/login?error=token_exchange_failed&error_description=No access token received`;
             console.log(`[Gateway /auth/callback] Redirecting to frontend with error: ${errorRedirectUrl}`);
              return res.redirect(errorRedirectUrl);
-        }
+        } 
 
         // 3. Redirect user back to the frontend dashboard with tokens in URL Fragment
         // Construct the redirect URL with the access token, refresh token, and expires_in in the fragment
