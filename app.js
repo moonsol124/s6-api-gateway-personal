@@ -5,6 +5,7 @@ const cors = require('cors');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const axios = require('axios');
 const jwt = require('jsonwebtoken'); // Required for JWT validation middleware
+const rateLimit = require('express-rate-limit'); // Import the rate limit middleware
 
 const app = express();
 const gatewayPort = process.env.GATEWAY_PORT || 3002;
@@ -95,14 +96,49 @@ const requireAuth = (req, res, next) => {
     }
 };
 
+// --- Rate Limiting Configuration ---
 
-// --- Define Proxy Routes (Apply middleware here) ---
+// Basic rate limit applied to all incoming requests (IP-based)
+const generalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 1000, // Limit each IP to 100 requests per windowMs
+    message: {
+        status: 429,
+        error: 'Too Many Requests',
+        message: 'Too many requests from this IP address, please try again after 15 minutes.'
+    },
+    statusCode: 429, // HTTP status code for rate-limited responses
+    headers: true, // Send rate limit info in the headers (X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After)
+    // store: new RedisStore({ ... }), // Optional: Use Redis or another store for multi-instance scaling
+});
+
+// Stricter rate limit for authentication-related endpoints (IP-based)
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 15, // e.g., Limit each IP to 15 auth attempts (login, refresh) per windowMs
+    message: {
+        status: 429,
+        error: 'Too Many Requests',
+        message: 'Too many authentication requests from this IP address, please try again after 15 minutes.'
+    },
+     statusCode: 429,
+     headers: true,
+});
+
+
+// --- Apply General Rate Limiter to ALL incoming requests (or specific routes) ---
+// You can apply a general limiter here, or apply specific limiters per route category.
+// Applying a general limiter first can protect against basic flooding attacks.
+// app.use(generalLimiter); // <--- Option 1: Apply globally (might be too broad)
+
+// --- Or apply limiters to specific route groups ---
+// Let's apply the `generalLimiter` to the API proxies and the `authLimiter` to the auth routes.
 
 console.log(`>>> Configuring proxy for /api/users. Target URL: [${userServiceUrl}]`);
-// Apply requireAuth middleware BEFORE the proxy if authentication is needed for these routes.
-// Based on your latest comment, you removed requireAuth here, so keeping it removed below:
+// Apply rate limiter BEFORE the proxy
 app.use('/api/users',
-    // If authentication is required, UNCOMMENT the line below:
+    generalLimiter, // Apply the general API rate limit
+    // If authentication is required, UNCOMMENT the line below (it must come AFTER the limiter if limiter is IP-based, but BEFORE if limiter is user-based)
     // requireAuth, // <--- UNCOMMENT THIS IF USER/PROPERTY ROUTES NEED AUTH VIA GATEWAY
     createProxyMiddleware({
     target: userServiceUrl,
@@ -115,10 +151,6 @@ app.use('/api/users',
         // Authorization and X-User-ID headers will be added by requireAuth *if* it's uncommented above
         console.log(`[Gateway->Users] Authorization Header Sent: ${proxyReq.getHeader('Authorization') ? 'Yes' : 'No'}`);
         console.log(`[Gateway->Users] X-User-ID Header Sent: ${proxyReq.getHeader('X-User-ID') || 'No'}`);
-
-        // ** http-proxy-middleware correctly handles forwarding the raw body
-        // ** for POST/PUT etc., as long as no prior middleware has consumed the stream.
-        // ** By removing the global body parsers, this works.
     },
     onError: (err, req, res) => {
        console.error('Users Proxy Error:', err);
@@ -130,10 +162,10 @@ app.use('/api/users',
 
 
 console.log(`>>> Configuring proxy for /api/property-service. Target URL: [${propertiesServiceUrl}]`);
-// Apply requireAuth middleware BEFORE the proxy if authentication is needed for these routes.
-// Based on your latest comment, you removed requireAuth here, so keeping it removed below:
+// Apply rate limiter BEFORE the proxy
 app.use('/api/property-service',
-    // If authentication is required, UNCOMMENT the line below:
+    generalLimiter, // Apply the general API rate limit
+    // If authentication is required, UNCOMMENT the line below
     // requireAuth, // <--- UNCOMMENT THIS IF USER/PROPERTY ROUTES NEED AUTH VIA GATEWAY
     createProxyMiddleware({
     target: propertiesServiceUrl,
@@ -157,21 +189,23 @@ app.use('/api/property-service',
 
 
 // --- Basic Route for Testing Gateway (No Auth Required by Gateway) ---
-app.get('/', (req, res) => {
+app.get('/', generalLimiter, (req, res) => { // Apply general limiter here too
      res.send('API Gateway is running');
 });
 
 
-// --- Authentication Routes (NEED Body Parsing) ---
+// --- Authentication Routes (NEED Body Parsing and Auth Limiter) ---
 
-// Apply body parsing middleware specifically to the /auth routes
-// These routes are handled directly by the Gateway and need to parse request bodies.
-// Placing these AFTER the proxy definitions ensures they don't interfere with proxying.
+// Apply rate limit specifically to auth routes
+app.use('/auth', authLimiter); // <--- Apply auth-specific rate limit here
+
+// Apply body parsing middleware specifically to the /auth routes *after* rate limiting
 app.use('/auth', express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/auth', express.json());
 
 
-// 1. Callback URL: Handles the redirect from the OAuth server (GET request, no body parsing needed here)
+// 1. Callback URL: Handles the redirect from the OAuth server (GET request)
+// Rate limit applied by app.use('/auth', authLimiter) above
 app.get('/auth/callback', async (req, res) => {
     const { code, error, error_description, state } = req.query;
     console.log('[Gateway /auth/callback] Received callback. Query:', req.query);
@@ -264,6 +298,7 @@ app.get('/auth/callback', async (req, res) => {
 
 
 // --- Refresh Token Endpoint (Handles POST request with body) ---
+// Rate limit applied by app.use('/auth', authLimiter) above
 app.post('/auth/refresh', async (req, res) => {
     // Body is now parsed by app.use('/auth', express.urlencoded/json) BEFORE this handler runs
     const { refresh_token } = req.body;
@@ -332,6 +367,7 @@ app.post('/auth/refresh', async (req, res) => {
 });
 
 // --- Logout Endpoint (Handles POST request with body) ---
+// Rate limit applied by app.use('/auth', authLimiter) above
 app.post('/auth/logout', async (req, res) => {
     // Body is now parsed by app.use('/auth', express.urlencoded/json) before this handler runs
     const { refresh_token } = req.body;
@@ -366,6 +402,7 @@ app.post('/auth/logout', async (req, res) => {
 
 
 // --- 404 Handler for unmatched routes on the gateway ---
+// This could also have a general limiter applied if you want to limit requests to non-existent routes
 app.use((req, res) => {
     res.status(404).json({ error: 'Not Found on Gateway' });
 });
@@ -374,7 +411,7 @@ app.use((req, res) => {
 module.exports = app;
 
 // Start the server only if the file is executed directly (not when imported for testing)
-if (require.main === module) { 
+if (require.main === module) {
   app.listen(gatewayPort, () => {
     console.log(`API Gateway listening at http://localhost:${gatewayPort}`);
     console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);
@@ -382,7 +419,8 @@ if (require.main === module) {
     console.log(`OAuth Callback URI configured as: ${process.env.GATEWAY_CALLBACK_URI}`);
     console.log(`JWT Secret loaded: ${jwtSecret ? 'Yes' : 'No (FATAL!)'}`);
     // NOTE: These routes no longer require auth *at the Gateway level* in this config
-    console.log(`Proxying /api/users -> ${userServiceUrl}/profiles (NO AUTH REQUIRED AT GATEWAY)`);
-    console.log(`Proxying /api/property-service -> ${propertiesServiceUrl}/properties (NO AUTH REQUIRED AT GATEWAY)`);
+    console.log(`Proxying /api/users -> ${userServiceUrl}/profiles (Rate limited by generalLimiter)`);
+    console.log(`Proxying /api/property-service -> ${propertiesServiceUrl}/properties (Rate limited by generalLimiter)`);
+    console.log(`Auth routes (/auth/*) are rate limited by authLimiter`);
   });
 }
