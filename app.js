@@ -371,7 +371,11 @@ app.use((req, res) => {
 });
 
 // --- Start the Gateway Server ---
-app.listen(gatewayPort, () => {
+module.exports = app;
+
+// Start the server only if the file is executed directly (not when imported for testing)
+if (require.main === module) {
+  app.listen(gatewayPort, () => {
     console.log(`API Gateway listening at http://localhost:${gatewayPort}`);
     console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);
     console.log(`OAuth Server URL configured as: ${process.env.OAUTH_SERVER_URL}`);
@@ -380,4 +384,5 @@ app.listen(gatewayPort, () => {
     // NOTE: These routes no longer require auth *at the Gateway level* in this config
     console.log(`Proxying /api/users -> ${userServiceUrl}/profiles (NO AUTH REQUIRED AT GATEWAY)`);
     console.log(`Proxying /api/property-service -> ${propertiesServiceUrl}/properties (NO AUTH REQUIRED AT GATEWAY)`);
-});
+  });
+}
