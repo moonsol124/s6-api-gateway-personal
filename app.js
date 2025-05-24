@@ -374,7 +374,7 @@ app.use((req, res) => {
 module.exports = app;
 
 // Start the server only if the file is executed directly (not when imported for testing)
-if (require.main === module) {
+if (require.main === module) { 
   app.listen(gatewayPort, () => {
     console.log(`API Gateway listening at http://localhost:${gatewayPort}`);
     console.log(`Frontend URL configured as: ${process.env.FRONTEND_URL}`);

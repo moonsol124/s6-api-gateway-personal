@@ -3,50 +3,53 @@
 name: CI - Gateway Tests
 
 on:
-  # Trigger the workflow on push to the main branch
   push:
     branches:
       - main # Replace 'main' with your default branch name if different
-
-  # Trigger the workflow on pull requests targeting the main branch
   pull_request:
     branches:
       - main # Replace 'main' with your default branch name if different
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
   test:
     name: Run Unit and Integration Tests
-    runs-on: ubuntu-latest # Use a standard Linux runner
+    runs-on: ubuntu-latest
 
-    # Set environment variables needed by your app.js validation and tests
-    # Use the mock values that align with your test file's beforeAll setup
     env:
       GATEWAY_PORT: 3003
       PROPERTIES_SERVICE_URL: http://mock-properties-service:3004
       USER_SERVICE_URL: http://mock-user-service:3001
       OAUTH_SERVER_URL: http://mock-oauth-server:3005
       OAUTH_CLIENT_ID: test_client
-      OAUTH_CLIENT_SECRET: test_secret # Using the test secret value
+      OAUTH_CLIENT_SECRET: test_secret
       GATEWAY_CALLBACK_URI: http://localhost:3003/auth/callback
-      FRONTEND_URL: http://localhost:5173 # Match test expectation
-      JWT_SECRET: supersecretjwtkeyfortests # Using the test secret value
+      FRONTEND_URL: http://localhost:5173
+      JWT_SECRET: supersecretjwtkeyfortests
 
     steps:
       - name: Checkout code
-        # Uses the official action to checkout your repository code
         uses: actions/checkout@v4
 
       - name: Set up Node.js
-        # Uses the official action to set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x' # Specify the Node.js version
+          node-version: '20.x'
 
+      # --- OPTIONAL: Add steps to clean cache or force re-install ---
+      # Option 1a: Clear npm cache before install
+      # - name: Clean npm cache
+      #   run: npm cache clean --force
+
+      # Option 1b: Disable caching entirely (useful for debugging cache issues)
+      # Remove or comment out the 'Cache Node.js modules' step below if using this for debugging.
+
+      # Option 1c: Use a slightly different cache key (less common but can help if the standard key is somehow problematic)
+      # Change key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+      # To something like: key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}-v1 # Add a version suffix
+
+      # --- Keep the cache step for performance if not debugging cache issues ---
       - name: Cache Node.js modules
-        # Caches node_modules to speed up subsequent runs
         uses: actions/cache@v4
         with:
           path: ~/.npm # Cache the npm cache directory
@@ -55,8 +58,11 @@ jobs:
             ${{ runner.os }}-node-
 
       - name: Install dependencies
-        run: npm install
+        # Use `--force` or remove the cache step if you suspect caching issues
+        # Using `npm ci` is often preferred in CI for cleaner installs if you have package-lock.json
+        run: npm ci # Use npm ci - it's designed for CI environments and uses package-lock.json strictly
 
+
+      # --- Keep the test step ---
       - name: Run tests
-        # Executes the test script defined in your package.json
-        run: npm test
+        run: npm test # This should now correctly find the jest binary if npm ci worked
